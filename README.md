@@ -623,6 +623,15 @@ Write tools let you upload, organize, and manage documents on your reMarkable. *
 | Move | ❌ | ✅ | ✅ | ❌ |
 | Rename | ❌ | ✅ | ✅ | ❌ |
 | Delete | ❌ | ✅ (→ trash) | ✅ (→ trash; optional permanent) | ❌ |
+| Upload from remote clients (base64 / one-time link) | ❌ | ✅ | ✅ | ✅ (tablet-selected folder) |
+| Tags on upload | ❌ | ✅ | ✅ | ❌ |
+| Replace same-named document, create folders | ❌ | ✅ | ❌ | ❌ |
+| `remarkable_tag` (add/remove tags) | ❌ | ✅ | ❌ | ❌ |
+
+Clients that cannot place a file on the server host (claude.ai, scheduled
+routines, code sandboxes) upload with `remarkable_upload_base64` (small files)
+or `remarkable_upload_link` (one-time HTTPS link, any size). Exports gain a plain
+`download_url` the same way. See [docs/file-transfer.md](docs/file-transfer.md).
 
 ### Disabling Write Tools (read-only mode)
 

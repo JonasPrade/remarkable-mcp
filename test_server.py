@@ -132,13 +132,14 @@ class TestMCPServerInitialization:
 
     @pytest.mark.asyncio
     async def test_tools_count(self):
-        """Cloud default: 7 read/export tools + always-on canvas + 6 write tools.
+        """Cloud default: 7 read/export tools + always-on canvas + 8 write tools.
 
-        ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, so
-        the default cloud surface is 14 tools.
+        ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, and
+        ``remarkable_upload_link`` needs REMARKABLE_PUBLIC_URL, so the default
+        cloud surface is 16 tools (6 classic write tools + upload_base64 + tag).
         """
         tools = await _list_tools()
-        assert len(tools) == 14, f"Expected 14 tools, got {len(tools)}"
+        assert len(tools) == 16, f"Expected 16 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1585,7 +1586,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await _list_tools()
 
-        assert len(tools) == 14
+        assert len(tools) == 16
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -2020,9 +2021,10 @@ class TestTagSupport:
                 result = await _call_tool("remarkable_browse", {"path": "/", "tags": ["work"]})
                 data = json.loads(result.content[0].text)
 
-                assert data["mode"] == "browse"
-                assert len(data["documents"]) == 1
-                assert data["documents"][0]["name"] == "Work Doc"
+                # A tag filter searches the whole library rather than one folder.
+                assert data["mode"] == "search"
+                assert len(data["results"]) == 1
+                assert data["results"][0]["name"] == "Work Doc"
                 assert "filter_tags" in data
                 assert data["filter_tags"] == ["work"]
 

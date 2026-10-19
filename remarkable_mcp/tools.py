@@ -61,8 +61,10 @@ from remarkable_mcp.extract import (
     render_page_full_page_from_document_zip,
     render_tablet_pdf_page_to_png,
 )
+from remarkable_mcp.file_links import export_download_url
 from remarkable_mcp.responses import make_error, make_response
 from remarkable_mcp.server import mcp
+from remarkable_mcp.tags import matches_tags, tag_names
 
 logger = logging.getLogger(__name__)
 
@@ -945,6 +947,11 @@ async def remarkable_read(
         )
 
 
+def _item_tags(item) -> tuple:
+    """Return ``(document_tags, page_tags)`` as plain name lists for any transport."""
+    return tag_names(getattr(item, "tags", None)), tag_names(getattr(item, "page_tags", None))
+
+
 @mcp.tool(annotations=BROWSE_ANNOTATIONS)
 async def remarkable_browse(
     path: str = "/", query: Optional[str] = None, tags: Optional[List[str]] = None
@@ -958,11 +965,16 @@ async def remarkable_browse(
        - Use path="/FolderName" to navigate into folders
     2. Search mode: Find documents by name
        - Set query="search term" to search across all documents
-    3. Filter by tags: Find documents with specific tags
-       - Set tags=["tag1", "tag2"] to filter by tags
-       - Works in both browse and search modes
+    3. Filter by tags: Find documents carrying any of the given tags
+       - Set tags=["tag1", "tag2"]; matches document tags and page tags
+         (case-insensitive, any one tag is enough)
+       - Searches every document below `path` (default: the whole library),
+         not only the folder's direct children
+       - Combine with query to also filter by name
 
-    Results include document names, types, modification dates, and tags.
+    Results include document names, types, modification dates, document tags
+    ("tags") and page tags ("page_tags"). To download matching documents, call
+    remarkable_export() for each result path.
 
     Note: If REMARKABLE_ROOT_PATH is configured, only documents within that
     folder are accessible. Paths are relative to the root path.
@@ -970,7 +982,7 @@ async def remarkable_browse(
     <parameters>
     - path: Folder path to browse (default: "/" for root)
     - query: Search term to find documents by name (optional, triggers search mode)
-    - tags: List of tags to filter documents (optional, case-insensitive)
+    - tags: Tags to filter documents by (optional, case-insensitive, any match)
     </parameters>
     <examples>
     - remarkable_browse()  # List root folder
@@ -978,6 +990,7 @@ async def remarkable_browse(
     - remarkable_browse(query="meeting")  # Search for "meeting"
     - remarkable_browse(tags=["important"])  # Show documents with "important" tag
     - remarkable_browse(query="project", tags=["work"])  # Search with tag filter
+    - remarkable_browse("/Tagesplan", tags=["erledigt"])  # Tagged documents in a subtree
     </examples>
     """
     try:
@@ -990,9 +1003,11 @@ async def remarkable_browse(
         # Resolve user path to actual device path
         actual_path = _resolve_root_path(path)
 
-        # Search mode
-        if query:
-            query_lower = query.lower()
+        # Search mode: by name, by tags, or both. A tag filter without a query
+        # searches the whole subtree under `path` (tags are rarely folder-local).
+        if query or tags:
+            query_lower = (query or "").lower()
+            scope = actual_path.rstrip("/") if actual_path not in ("", "/") else ""
             matches = []
 
             for item in collection:
@@ -1003,13 +1018,11 @@ async def remarkable_browse(
                 # Filter by root path
                 if not _is_within_root(item_path, root):
                     continue
-                # Filter by tags if provided
-                if tags:
-                    item_tags_lower = [
-                        t.lower() for t in (item.tags if hasattr(item, "tags") else [])
-                    ]
-                    if not any(tag.lower() in item_tags_lower for tag in tags):
-                        continue
+                if scope and not item_path.lower().startswith(scope.lower() + "/"):
+                    continue
+                doc_tags, page_tags = _item_tags(item)
+                if tags and (item.is_folder or not matches_tags(tags, doc_tags, page_tags)):
+                    continue
                 if query_lower in item.VissibleName.lower():
                     match_info = {
                         "name": item.VissibleName,
@@ -1019,9 +1032,10 @@ async def remarkable_browse(
                             item.ModifiedClient if hasattr(item, "ModifiedClient") else None
                         ),
                     }
-                    # Add tags if present
-                    if hasattr(item, "tags") and item.tags:
-                        match_info["tags"] = item.tags
+                    if doc_tags:
+                        match_info["tags"] = doc_tags
+                    if page_tags:
+                        match_info["page_tags"] = page_tags
                     matches.append(match_info)
 
             matches.sort(key=lambda x: x["name"])
@@ -1029,13 +1043,16 @@ async def remarkable_browse(
             result = {"mode": "search", "query": query, "count": len(matches), "results": matches}
             if tags:
                 result["filter_tags"] = tags
+            if scope:
+                result["path"] = path
 
             if matches:
                 first_doc = next((m for m in matches if m["type"] == "document"), None)
                 if first_doc:
                     hint = (
                         f"Found {len(matches)} results. "
-                        f"To read a document: remarkable_read('{first_doc['name']}')."
+                        f"To read a document: remarkable_read('{first_doc['path']}'). "
+                        f"To download one: remarkable_export('{first_doc['path']}')."
                     )
                 else:
                     hint = (
@@ -1044,10 +1061,11 @@ async def remarkable_browse(
                     )
             else:
                 filter_desc = f" with tags {tags}" if tags else ""
+                what = f"'{query}'" if query else "documents"
                 hint = (
-                    f"No results for '{query}'{filter_desc}. "
+                    f"No results for {what}{filter_desc}. "
                     "Try remarkable_browse('/') to see all files, "
-                    "or use a different search term."
+                    "or use a different search term or tag."
                 )
 
             return make_response(result, hint)
@@ -1145,11 +1163,6 @@ async def remarkable_browse(
             # Skip cloud-archived items
             if _is_cloud_archived(item):
                 continue
-            # Filter by tags if provided
-            if tags and not item.is_folder:
-                item_tags_lower = [t.lower() for t in (item.tags if hasattr(item, "tags") else [])]
-                if not any(tag.lower() in item_tags_lower for tag in tags):
-                    continue
             if item.is_folder:
                 folders.append({"name": item.VissibleName, "id": item.ID})
             else:
@@ -1158,18 +1171,17 @@ async def remarkable_browse(
                     "id": item.ID,
                     "modified": (item.ModifiedClient if hasattr(item, "ModifiedClient") else None),
                 }
-                # Add tags if present
-                if hasattr(item, "tags") and item.tags:
-                    doc_info["tags"] = item.tags
+                doc_tags, page_tags = _item_tags(item)
+                if doc_tags:
+                    doc_info["tags"] = doc_tags
+                if page_tags:
+                    doc_info["page_tags"] = page_tags
                 documents.append(doc_info)
 
         result = {"mode": "browse", "path": path, "folders": folders, "documents": documents}
-        if tags:
-            result["filter_tags"] = tags
 
         # Build helpful hint
-        tag_desc = f" with tags {tags}" if tags else ""
-        hint_parts = [f"Found {len(folders)} folder(s) and {len(documents)} document(s){tag_desc}."]
+        hint_parts = [f"Found {len(folders)} folder(s) and {len(documents)} document(s)."]
 
         if documents:
             hint_parts.append(f"To read a document: remarkable_read('{documents[0]['name']}').")
@@ -1331,7 +1343,7 @@ async def remarkable_search(
     - grep: Optional pattern to search within document content
     - limit: Max documents to return (default: 5, max: 5)
     - include_ocr: Enable OCR for handwritten content (default: False)
-    - tags: List of tags to filter documents (optional, case-insensitive)
+    - tags: Tags to filter documents by (optional, case-insensitive, any match)
     </parameters>
     <examples>
     - remarkable_search("meeting")  # Find docs with "meeting" in name
@@ -2388,6 +2400,12 @@ async def remarkable_export(
     resource expires after 15 minutes and may be evicted earlier when more than
     eight exports are retained. Fetch and save the linked resource for durable use.
 
+    When the server has a public URL, the response also carries `download_url`:
+    a plain HTTPS link to the same file that a code sandbox can fetch with curl,
+    so the file never passes through the conversation. To download every
+    document with a tag, find them with remarkable_browse(tags=[...]) and export
+    each result path.
+
     PDF behavior:
     - `pdf_mode="merged"` (default) preserves complete physical pages, combining
       mapped PDF underlays and reMarkable annotations.
@@ -2509,6 +2527,9 @@ async def remarkable_export(
         "expires_at": resource.expires_at,
         "temporary_local_file": True,
     }
+    download_url = export_download_url(resource.export_id, resource.filename)
+    if download_url:
+        response["download_url"] = download_url
     if result.pdf_mode is not None:
         response["pdf_mode"] = result.pdf_mode
     if build.ocr_backend:
@@ -2519,6 +2540,11 @@ async def remarkable_export(
         f"({resource.size} bytes). It expires at {resource.expires_at.isoformat()}; "
         "fetch and save the resource for durable storage. The tablet was not modified."
     )
+    if download_url:
+        hint += (
+            " To get the file into a code sandbox without passing it through the "
+            'conversation: curl -sS --fail -o FILE "<download_url>".'
+        )
     if build.status == "partial":
         hint = f"Partial export: {'; '.join(build.warnings) or 'some pages failed'}. {hint}"
 

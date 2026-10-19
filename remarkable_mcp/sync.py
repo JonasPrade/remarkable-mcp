@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional
 import requests
 from requests.adapters import HTTPAdapter
 
+from remarkable_mcp.tags import apply_tag_changes, tag_entries, tag_names
+
 logger = logging.getLogger(__name__)
 
 # Thread-local HTTP sessions for connection pooling under parallel traversal.
@@ -338,6 +340,7 @@ class Document:
     size: int = 0
     files: List[Dict[str, Any]] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    page_tags: List[str] = field(default_factory=list)
 
     @property
     def is_folder(self) -> bool:
@@ -591,8 +594,10 @@ class RemarkableClient:
         except Exception:
             return None
 
-        # Find and fetch the metadata file
+        # Find and fetch the metadata file, plus the .content file for tags
+        # (the tablet stores document and page tags there, not in .metadata).
         metadata: Dict[str, Any] = {}
+        content: Dict[str, Any] = {}
         files = []
 
         for blob_entry in blob_entries:
@@ -603,6 +608,13 @@ class RemarkableClient:
                     metadata = json.loads(meta_content.decode("utf-8"))
                 except Exception:
                     pass
+            elif blob_entry["id"].endswith(".content"):
+                try:
+                    content = json.loads(
+                        self._get_file(blob_entry["hash"], blob_entry["id"]).decode("utf-8")
+                    )
+                except Exception:
+                    content = {}
 
         # Skip deleted documents
         if metadata.get("deleted", False):
@@ -628,7 +640,8 @@ class RemarkableClient:
             last_modified=last_modified,
             size=entry["size"],
             files=files,
-            tags=metadata.get("tags", []),
+            tags=tag_names(content.get("tags")) or tag_names(metadata.get("tags")),
+            page_tags=tag_names(content.get("pageTags")),
         )
 
     def get_doc(self, doc_id: str) -> Optional[Document]:
@@ -1014,12 +1027,51 @@ class RemarkableClient:
         """Restore a trashed document or folder back to ``parent_id`` ("" = root)."""
         self.move(doc_id, parent_id or "")
 
+    def set_tags(
+        self,
+        doc_id: str,
+        add: Optional[List[str]] = None,
+        remove: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Add/remove document tags (stored in ``.content``); return the new tag names."""
+        result: Dict[str, List[str]] = {}
+
+        def mutate(entries):
+            entry = self._require_entry(entries, doc_id)
+            files = self._parse_index(self._get_file(entry["hash"], f"{doc_id}.docSchema"))
+            content_entry = next((f for f in files if f["id"].endswith(".content")), None)
+            if content_entry is None:
+                raise CloudWriteError(f"Document {doc_id} has no content blob (is it a folder?).")
+            content = json.loads(
+                self._get_file(content_entry["hash"], content_entry["id"]).decode("utf-8")
+            )
+            result["tags"] = apply_tag_changes(content, add, remove, int(self._now_ms()))
+            new_content = self._upload_file_blob(
+                json.dumps(content, sort_keys=True).encode("utf-8"), content_entry["id"]
+            )
+            files = [new_content if f["id"] == content_entry["id"] else f for f in files]
+            # Bump the metadata too so devices notice the change.
+            doc_entry = self._upload_doc_index(doc_id, files)
+            return self._replace_root_entry(
+                entries, self._mutate_doc_metadata(doc_entry, lambda meta: None)
+            )
+
+        self._sync_root(mutate)
+        return result.get("tags", [])
+
+    def has_annotations(self, doc: Document) -> bool:
+        """True when the document carries ink: any non-empty ``.rm`` page file."""
+        return any(
+            f["id"].endswith(".rm") and int(f.get("size", 0)) > 0 for f in self._ensure_files(doc)
+        )
+
     def upload_document(
         self,
         content: bytes,
         name: str,
         file_type: str,
         parent_id: str = "",
+        tags: Optional[List[str]] = None,
     ) -> Document:
         """Upload a PDF or EPUB document to the cloud and return it.
 
@@ -1049,7 +1101,7 @@ class RemarkableClient:
             "pageCount": page_count,
             "pageTags": [],
             "pages": page_uuids,
-            "tags": [],
+            "tags": tag_entries(tags or [], int(now)),
             "textScale": 1,
         }
         metadata = {
@@ -1089,6 +1141,8 @@ class RemarkableClient:
             name=name,
             doc_type="DocumentType",
             parent=parent_id or "",
+            files=files,
+            tags=[t["name"] for t in content_json["tags"]],
         )
 
     @staticmethod

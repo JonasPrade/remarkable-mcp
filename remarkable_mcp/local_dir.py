@@ -44,6 +44,7 @@ from typing import Dict, List, Optional
 # exact same xochitl layout, so documents carry the same fields. Importing it
 # performs no SSH activity.
 from remarkable_mcp.ssh import Document
+from remarkable_mcp.tags import tag_names
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,15 @@ class LocalDirClient:
                 except (ValueError, TypeError, OSError):
                     pass
 
+            # Tags live in .content, not .metadata.
+            content = {}
+            content_path = self.base_dir / f"{doc_id}.content"
+            if content_path.is_file():
+                try:
+                    content = json.loads(content_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    content = {}
+
             documents.append(
                 Document(
                     id=doc_id,
@@ -137,7 +147,8 @@ class LocalDirClient:
                     synced=metadata.get("synced", True),
                     last_modified=last_modified,
                     size=0,
-                    tags=metadata.get("tags", []),
+                    tags=tag_names(content.get("tags")) or tag_names(metadata.get("tags")),
+                    page_tags=tag_names(content.get("pageTags")),
                     local_path=str(self.base_dir / doc_id),
                 )
             )

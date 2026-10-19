@@ -98,7 +98,8 @@ def _build_instructions() -> str:
         """
 ## Available Tools
 
-- `remarkable_browse(path, query)` - Browse folders or search for documents
+- `remarkable_browse(path, query, tags)` - Browse folders, search by name, or
+  find every document carrying a tag
 - `remarkable_read(document, content_type, page, grep)` - Read document content with pagination
 - `remarkable_recent(limit)` - Get recently modified documents
 - `remarkable_status()` - Check connection and diagnose issues
@@ -237,7 +238,14 @@ For faster access and raw files, consider SSH mode: `uvx remarkable-mcp --ssh`
 Write operations are enabled (the default). These tools modify your cloud library
 and sync to all your devices:
 
-- `remarkable_upload(file_path, parent_folder, document_name)` - Upload a PDF/EPUB
+- `remarkable_upload(file_path, parent_folder, document_name, tags, replace)` -
+  Upload a PDF/EPUB that already exists on the server
+- `remarkable_upload_link(document_name, parent_folder, tags, replace)` - Get a
+  one-time HTTPS link and send your own PDF/EPUB with curl (only listed when the
+  server has a public URL; preferred for files you generate)
+- `remarkable_upload_base64(content_base64, document_name, parent_folder, tags, replace)` -
+  Upload a small PDF/EPUB sent inline as base64
+- `remarkable_tag(document, add, remove)` - Add or remove document tags
 - `remarkable_markdown_to_pdf(markdown, document_name, parent_folder)` - Render
   Markdown as a PDF and upload it
 - `remarkable_mkdir(folder_name, parent)` - Create a folder
@@ -247,6 +255,8 @@ and sync to all your devices:
 
 ### Safety
 - **Delete is destructive** — the MCP client should confirm with the user first
+- `replace=True` on uploads refuses to replace a document that has handwriting
+  unless `force_replace=True`; replaced versions go to the trash
 - Changes sync to your devices; use `remarkable_browse()` to verify them
 - Run with `--read-only` to disable all write tools
 """
@@ -359,6 +369,11 @@ from remarkable_mcp import write_tools as _write_tools  # noqa: E402
 
 if _write_tools.write_enabled():
     _write_tools.register_write_tools()
+
+# Plain HTTPS download links for temporary exports (only with REMARKABLE_PUBLIC_URL).
+from remarkable_mcp.file_links import register_download_route  # noqa: E402
+
+register_download_route()
 
 # Register the interactive MCP App canvas (remarkable_canvas + ui:// resource).
 # There is no feature flag: app-capable clients (those advertising the MCP Apps
