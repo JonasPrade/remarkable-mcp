@@ -32,7 +32,7 @@ import time
 import uuid
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
-from typing import Annotated, Optional
+from typing import Annotated, List, Literal, Optional
 
 from mcp.server.mcpserver import Context, Elicit, ElicitationResult, Resolve
 from mcp.types import ToolAnnotations
@@ -51,6 +51,7 @@ from remarkable_mcp.ssh_reliability import (
     SSHPreExecutionError,
     SSHReliabilityError,
 )
+from remarkable_mcp.tags import tag_entries
 
 logger = logging.getLogger(__name__)
 _write_context = threading.local()
@@ -1059,6 +1060,262 @@ def _cloud_delete(document: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Byte uploads (shared by remarkable_upload, remarkable_upload_base64 and the
+# one-time HTTP upload links in file_links.py)
+# ---------------------------------------------------------------------------
+
+UPLOAD_FILE_TYPES = ("pdf", "epub")
+
+
+def max_upload_bytes() -> int:
+    """Upper bound for uploads that arrive as bytes (REMARKABLE_MAX_UPLOAD_MB, default 50)."""
+    try:
+        megabytes = float(os.environ.get("REMARKABLE_MAX_UPLOAD_MB", "50"))
+    except ValueError:
+        megabytes = 50
+    return int(max(megabytes, 0.1) * 1024 * 1024)
+
+
+def validate_upload_bytes(data: bytes, file_type: str) -> Optional[str]:
+    """Return an error response when ``data`` is not a plausible ``file_type`` file."""
+    if file_type not in UPLOAD_FILE_TYPES:
+        return make_error(
+            error_type="unsupported_format",
+            message=f"Unsupported file format: '{file_type}'",
+            suggestion="Only PDF and EPUB files can be uploaded to reMarkable.",
+        )
+    if not data:
+        return make_error(
+            error_type="empty_upload",
+            message="The uploaded file is empty.",
+            suggestion="Send the complete PDF or EPUB file.",
+        )
+    if len(data) > max_upload_bytes():
+        return make_error(
+            error_type="upload_too_large",
+            message=f"The file is {len(data)} bytes; the limit is {max_upload_bytes()} bytes.",
+            suggestion="Split the document or raise REMARKABLE_MAX_UPLOAD_MB on the server.",
+        )
+    magic = b"%PDF-" if file_type == "pdf" else b"PK"
+    if not data[:1024].lstrip().startswith(magic):
+        return make_error(
+            error_type="invalid_file",
+            message=f"The data does not look like a {file_type.upper()} file.",
+            suggestion=(
+                "Check the encoding: send the raw file bytes (HTTP link) or standard "
+                "base64 of the file (remarkable_upload_base64)."
+            ),
+        )
+    return None
+
+
+def _ensure_cloud_folder(client, folder_path: str) -> str:
+    """Return the id of ``folder_path``, creating missing folders along the way."""
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    parent_id = _resolve_parent_id(folder_path, items_by_id, collection)
+    if parent_id is not None:
+        return parent_id
+
+    parent_id = ""
+    walked = ""
+    for part in [p for p in folder_path.strip("/").split("/") if p]:
+        walked = f"{walked}/{part}"
+        existing = _resolve_parent_id(walked, items_by_id, collection)
+        if existing is None:
+            existing = client.create_folder(part, parent_id).id
+            _invalidate_client_cache(client)
+            collection = client.get_meta_items()
+            items_by_id = get_items_by_id(collection)
+        parent_id = existing
+    return parent_id
+
+
+def _cloud_upload_bytes(
+    data: bytes,
+    file_type: str,
+    name: str,
+    parent_folder: str = "/",
+    tags: Optional[list] = None,
+    replace: bool = False,
+    force_replace: bool = False,
+    create_folders: bool = False,
+) -> str:
+    """Upload ``data`` to the cloud, optionally replacing a same-named document."""
+    from remarkable_mcp.tags import clean_tag_list
+
+    client = get_rmapi()
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    parent_id = _resolve_parent_id(parent_folder, items_by_id, collection)
+    if parent_id is None:
+        if not create_folders:
+            folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+            return make_error(
+                error_type="folder_not_found",
+                message=f"Folder not found: '{parent_folder}'",
+                suggestion=(
+                    "Use remarkable_browse('/') to see available folders, or pass "
+                    "create_folders=True to create the missing folders."
+                ),
+                did_you_mean=folders[:5] if folders else None,
+            )
+        parent_id = _ensure_cloud_folder(client, parent_folder)
+        collection = client.get_meta_items()
+
+    existing = [
+        item
+        for item in collection
+        if not item.is_folder
+        and item.Parent == parent_id
+        and item.VissibleName.lower() == name.lower()
+    ]
+    replaced = []
+    if existing and replace:
+        annotated = {item.ID for item in existing if client.has_annotations(item)}
+        if annotated and not force_replace:
+            return make_error(
+                error_type="has_annotations",
+                message=(
+                    f"'{name}' in '{parent_folder}' already has handwriting; "
+                    "replacing it would discard that ink."
+                ),
+                suggestion=(
+                    "Upload under a different document_name, or pass force_replace=True "
+                    "to replace it anyway (the old version goes to the trash)."
+                ),
+            )
+        replaced = [{"uuid": item.ID, "had_annotations": item.ID in annotated} for item in existing]
+
+    clean_tags = clean_tag_list(tags)
+    doc = client.upload_document(data, name, file_type, parent_id, tags=clean_tags)
+    # Trash the old version only after the new one is safely committed.
+    for item in replaced:
+        client.delete(item["uuid"])
+    _invalidate_client_cache(client)
+
+    result = {
+        "uploaded": True,
+        "name": name,
+        "uuid": doc.id,
+        "format": file_type,
+        "parent_folder": parent_folder,
+        "path": f"{parent_folder.rstrip('/')}/{name}",
+        "size": len(data),
+        "transport": "cloud",
+    }
+    if clean_tags:
+        result["tags"] = clean_tags
+    if replaced:
+        result["replaced"] = replaced
+    elif existing:
+        result["note"] = (
+            f"A document named '{name}' already existed in this folder; both are kept. "
+            "Pass replace=True to replace it instead."
+        )
+    hint = "Document uploaded to the reMarkable cloud."
+    if replaced:
+        hint += " The previous version was moved to the trash."
+    return make_response(result, hint + " Use remarkable_browse() to verify it appears.")
+
+
+def _cloud_set_tags(document: str, add: Optional[list], remove: Optional[list]) -> str:
+    """Add/remove document tags on a cloud document."""
+    client = get_rmapi()
+    collection = client.get_meta_items()
+    items_by_id = get_items_by_id(collection)
+    target = _resolve_document(document, collection, items_by_id)
+    if not target or target.is_folder:
+        from remarkable_mcp.extract import find_similar_documents
+
+        similar = find_similar_documents(document, [i for i in collection if not i.is_folder])
+        return make_error(
+            error_type="document_not_found",
+            message=f"Document not found: '{document}'",
+            suggestion="Use remarkable_browse() to find the exact name or path. "
+            "Folders cannot carry tags.",
+            did_you_mean=similar if similar else None,
+        )
+    tags = client.set_tags(target.ID, add=add, remove=remove)
+    _invalidate_client_cache(client)
+    return make_response(
+        {
+            "document": target.VissibleName,
+            "path": get_item_path(target, items_by_id),
+            "uuid": target.ID,
+            "tags": tags,
+            "transport": "cloud",
+        },
+        "Tags updated. They sync to the tablet like any other change.",
+    )
+
+
+_upload_file_tool = None  # set to remarkable_upload by register_write_tools()
+
+
+async def upload_bytes(
+    data: bytes,
+    file_type: str,
+    document_name: str,
+    parent_folder: str = "/",
+    tags: Optional[list] = None,
+    replace: bool = False,
+    force_replace: bool = False,
+    create_folders: bool = False,
+    defer_restart: bool = False,
+) -> str:
+    """Validate and upload raw file bytes through the active transport."""
+    file_type = (file_type or "").lower().lstrip(".")
+    error = _require_write_transport() or validate_upload_bytes(data, file_type)
+    if error:
+        return error
+    name = (document_name or "").strip()
+    if not name:
+        return make_error(
+            error_type="missing_document_name",
+            message="document_name is required.",
+            suggestion="Pass the display name the document should have on the tablet.",
+        )
+
+    if _is_cloud_mode():
+        try:
+            return await asyncio.to_thread(
+                _cloud_upload_bytes,
+                data,
+                file_type,
+                name,
+                parent_folder,
+                tags,
+                replace,
+                force_replace,
+                create_folders,
+            )
+        except Exception as e:
+            return make_error(
+                error_type="upload_failed",
+                message=f"Upload failed: {e}",
+                suggestion="Check remarkable_status() and try again.",
+            )
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = os.path.join(temp_dir, f"upload.{file_type}")
+        with open(path, "wb") as f:
+            f.write(data)
+        return await _upload_file_tool(
+            path,
+            parent_folder=parent_folder,
+            document_name=name,
+            defer_restart=defer_restart,
+            tags=tags,
+            replace=replace,
+            force_replace=force_replace,
+            create_folders=create_folders,
+        )
+
+
 class _DeleteConfirmation(BaseModel):
     """Schema for confirming a destructive delete via elicitation."""
 
@@ -1572,6 +1829,10 @@ def register_write_tools():
         parent_folder: str = "/",
         document_name: Optional[str] = None,
         defer_restart: bool = False,
+        tags: Optional[List[str]] = None,
+        replace: bool = False,
+        force_replace: bool = False,
+        create_folders: bool = False,
     ) -> str:
         """
         <usecase>Upload a PDF or EPUB file to the reMarkable tablet.</usecase>
@@ -1584,10 +1845,14 @@ def register_write_tools():
           document_name, parent_folder is ignored, and the tablet web service
           chooses the destination folder.
 
+        The file must already exist on the MCP server host. To send a file from
+        elsewhere (claude.ai, a code sandbox, a scheduled routine) use
+        remarkable_upload_base64 or remarkable_upload_link instead.
+
         Requires write mode (the default; disabled with --read-only).
         </instructions>
         <parameters>
-        - file_path: Absolute path to the local PDF or EPUB file
+        - file_path: Absolute path to the local PDF or EPUB file on the server
         - parent_folder: Destination folder path on tablet (default: root "/").
           Honored in cloud and SSH modes; ignored by the USB web interface.
         - document_name: Display name on tablet (default: filename without
@@ -1599,9 +1864,20 @@ def register_write_tools():
           link, so deferring turns N restarts (and N races) into one. The
           response sets "refresh_pending": true while a refresh is owed. Ignored
           in cloud/USB modes (no xochitl).
+        - tags: Document tags to set on upload, e.g. ["planung"]. Cloud and SSH.
+        - replace: Cloud only. Replace a document with the same name in the same
+          folder instead of adding a second copy. Refuses when that document
+          already has handwriting, unless force_replace is also True. The old
+          version goes to the trash.
+        - force_replace: Cloud only. With replace=True, replace even when the old
+          document has handwriting.
+        - create_folders: Cloud only. Create parent_folder (and its parents) when
+          missing instead of failing.
         </parameters>
         <examples>
         - remarkable_upload("/tmp/paper.pdf")
+        - remarkable_upload("/tmp/plan.pdf", parent_folder="/Tagesplan",
+                            tags=["tagesplan"], replace=True, create_folders=True)
         - remarkable_upload("/tmp/book.epub", parent_folder="/Books")
         - remarkable_upload("/tmp/report.pdf", document_name="Q4 Report")
         - # batch import: defer every upload, refresh once at the end
@@ -1633,36 +1909,31 @@ def register_write_tools():
                         suggestion="Only PDF and EPUB files can be uploaded to reMarkable.",
                     )
 
+                name = document_name or os.path.splitext(os.path.basename(file_path))[0]
+
                 # Cloud mode: upload via the sync v3/v4 blob protocol
                 if _is_cloud_mode():
-                    client = get_rmapi()
-                    collection = client.get_meta_items()
-                    items_by_id = get_items_by_id(collection)
-                    parent_id = _resolve_parent_id(parent_folder, items_by_id, collection)
-                    if parent_id is None:
-                        folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
-                        return make_error(
-                            error_type="folder_not_found",
-                            message=f"Folder not found: '{parent_folder}'",
-                            suggestion="Use remarkable_browse('/') to see available folders.",
-                            did_you_mean=folders[:5] if folders else None,
-                        )
-
-                    name = document_name or os.path.splitext(os.path.basename(file_path))[0]
                     with open(file_path, "rb") as f:
                         data = f.read()
-                    doc = client.upload_document(data, name, ext, parent_id)
-                    return make_response(
-                        {
-                            "uploaded": True,
-                            "name": name,
-                            "uuid": doc.id,
-                            "format": ext,
-                            "parent_folder": parent_folder,
-                            "transport": "cloud",
-                        },
-                        "Document uploaded to the reMarkable cloud. "
-                        "Use remarkable_browse() to verify it appears.",
+                    return _cloud_upload_bytes(
+                        data,
+                        ext,
+                        name,
+                        parent_folder=parent_folder,
+                        tags=tags,
+                        replace=replace,
+                        force_replace=force_replace,
+                        create_folders=create_folders,
+                    )
+
+                if replace or force_replace or create_folders:
+                    return make_error(
+                        error_type="unsupported_option",
+                        message="replace, force_replace and create_folders need cloud mode.",
+                        suggestion=(
+                            "Drop these options, or create the folder first with "
+                            "remarkable_mkdir and delete the old document yourself."
+                        ),
                     )
 
                 # USB web mode: simple HTTP upload
@@ -1737,6 +2008,8 @@ def register_write_tools():
                 content_data = {
                     "fileType": ext,
                 }
+                if tags:
+                    content_data["tags"] = tag_entries(tags)
                 _write_content_file(ssh_client, doc_uuid, content_data)
 
                 # Create the document directory (required by xochitl)
@@ -1803,6 +2076,138 @@ def register_write_tools():
             if callable(run_operation):
                 return await run_operation(usb_client, "upload", _impl)
         return await asyncio.to_thread(_impl)
+
+    global _upload_file_tool
+    _upload_file_tool = remarkable_upload
+
+    @mcp.tool(annotations=UPLOAD_ANNOTATIONS)
+    async def remarkable_upload_base64(
+        content_base64: str,
+        document_name: str,
+        parent_folder: str = "/",
+        file_type: Literal["pdf", "epub"] = "pdf",
+        tags: Optional[List[str]] = None,
+        replace: bool = False,
+        force_replace: bool = False,
+        create_folders: bool = False,
+        defer_restart: bool = False,
+    ) -> str:
+        """
+        <usecase>Upload a PDF or EPUB whose bytes you hold, sent inline as base64.</usecase>
+        <instructions>
+        Use this when the file exists on your side (generated in a code sandbox,
+        attached by the user) and not on the MCP server, so remarkable_upload
+        cannot read it.
+
+        Every base64 character passes through your output, so this is slow and
+        error-prone for anything but small files: prefer it below ~30 KB. For
+        larger files, or whenever your code sandbox can make HTTPS requests, use
+        remarkable_upload_link (if available) and send the bytes with curl.
+
+        Send standard base64 of the complete file (no data: prefix, no line
+        breaks needed). The server checks that the bytes really are a PDF/EPUB
+        before anything reaches the tablet.
+
+        Requires write mode (the default; disabled with --read-only).
+        </instructions>
+        <parameters>
+        - content_base64: The whole file, base64-encoded.
+        - document_name: Display name on the tablet (required).
+        - parent_folder: Destination folder path (default: root "/").
+        - file_type: "pdf" (default) or "epub".
+        - tags: Document tags to set, e.g. ["tagesplan"]. Cloud and SSH.
+        - replace: Cloud only. Replace a same-named document in the same folder.
+          Refuses if that document has handwriting, unless force_replace=True.
+          The old version goes to the trash.
+        - force_replace: Cloud only. Replace even a document with handwriting.
+        - create_folders: Cloud only. Create a missing parent_folder.
+        - defer_restart: SSH only, as in remarkable_upload.
+        </parameters>
+        <examples>
+        - remarkable_upload_base64("JVBERi0xLjcK...", document_name="Tagesplan 2026-10-19",
+                                   parent_folder="/Tagesplan", tags=["tagesplan"],
+                                   replace=True, create_folders=True)
+        </examples>
+        """
+        import base64
+        import binascii
+
+        try:
+            cleaned = "".join(content_base64.split())
+            if cleaned.startswith("data:") and "," in cleaned:
+                cleaned = cleaned.split(",", 1)[1]
+            data = base64.b64decode(cleaned + "=" * (-len(cleaned) % 4), validate=True)
+        except (binascii.Error, ValueError) as e:
+            return make_error(
+                error_type="invalid_base64",
+                message=f"content_base64 is not valid base64: {e}",
+                suggestion="Send standard base64 (A-Z, a-z, 0-9, +, /) of the whole file.",
+            )
+        return await upload_bytes(
+            data,
+            file_type,
+            document_name,
+            parent_folder=parent_folder,
+            tags=tags,
+            replace=replace,
+            force_replace=force_replace,
+            create_folders=create_folders,
+            defer_restart=defer_restart,
+        )
+
+    from remarkable_mcp.file_links import register_upload_link_tool
+
+    register_upload_link_tool()
+
+    if _is_cloud_mode():
+
+        @mcp.tool(annotations=WRITE_ANNOTATIONS)
+        async def remarkable_tag(
+            document: str,
+            add: Optional[List[str]] = None,
+            remove: Optional[List[str]] = None,
+        ) -> str:
+            """
+            <usecase>Add or remove document tags on a reMarkable document.</usecase>
+            <instructions>
+            Tags are the ones shown in the tablet's tag view. Matching is
+            case-insensitive; adding an existing tag or removing a missing one is
+            a no-op. Returns the document's tags after the change. Page tags are
+            not changed. Find tagged documents with remarkable_browse(tags=[...]).
+
+            Cloud mode only (the default transport). Requires write mode.
+            </instructions>
+            <parameters>
+            - document: Document name or path.
+            - add: Tags to add.
+            - remove: Tags to remove.
+            </parameters>
+            <examples>
+            - remarkable_tag("Tagesplan 2026-10-19", add=["erledigt"])
+            - remarkable_tag("/Projekte/Konzept", add=["review"], remove=["entwurf"])
+            </examples>
+            """
+            if not add and not remove:
+                return make_error(
+                    error_type="nothing_to_do",
+                    message="Pass tags in add and/or remove.",
+                    suggestion="Example: remarkable_tag('Doc', add=['work']).",
+                )
+
+            def _impl() -> str:
+                error = _require_write_transport()
+                if error:
+                    return error
+                try:
+                    return _cloud_set_tags(document, add, remove)
+                except Exception as e:
+                    return make_error(
+                        error_type="tag_failed",
+                        message=f"Updating tags failed: {e}",
+                        suggestion="Check remarkable_status() and try again.",
+                    )
+
+            return await asyncio.to_thread(_impl)
 
     @mcp.tool(annotations=UPLOAD_ANNOTATIONS)
     async def remarkable_markdown_to_pdf(

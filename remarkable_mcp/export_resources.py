@@ -226,6 +226,21 @@ class ExportResourceStore:
             # serializing large file I/O behind the global store lock.
             raise FileNotFoundError("Temporary export was not found or has expired") from None
 
+    def read_with_resource(self, export_id: str) -> tuple[bytes, ExportResource]:
+        """Read a live export of any format together with its public metadata."""
+        now = self._clock()
+        with self._lock:
+            self._prune_locked(now)
+            record = self._records.get(export_id)
+            if record is None:
+                raise FileNotFoundError("Temporary export was not found or has expired")
+            self._records.move_to_end(export_id)
+            path, resource = record.path, record.resource
+        try:
+            return path.read_bytes(), resource
+        except FileNotFoundError:
+            raise FileNotFoundError("Temporary export was not found or has expired") from None
+
     def read_text(self, export_id: str, output_format: ExportFormat) -> str:
         """Read a UTF-8 text export."""
         return self.read_bytes(export_id, output_format).decode("utf-8")
