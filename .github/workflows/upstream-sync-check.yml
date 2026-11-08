@@ -93,6 +93,13 @@ jobs:
           HEAD_SHA: ${{ steps.report.outputs.upstream_head }}
           FORCE: ${{ inputs.force || false }}
         run: |
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .has_issues)" != "true" ]; then
+            echo "::warning::Issues are disabled in this repository (default for forks)." \
+              "Report is only in the run summary; enable Issues in Settings -> General."
+            [ "$AHEAD" = "0" ] && echo "is_new=false" >> "$GITHUB_OUTPUT" \
+              || echo "is_new=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           gh label create "$ISSUE_LABEL" --color B60205 \
             --description "Upstream hat sich weiterentwickelt" 2>/dev/null || true
           number=$(gh issue list --label "$ISSUE_LABEL" --state open --limit 1 \
@@ -233,4 +240,7 @@ jobs:
             printf '\n---\n_Bewertung: %s via upstream-sync-check, [Lauf](%s)_\n' \
               "$MODEL" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } > comment.md
-          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file comment.md
+          fi
