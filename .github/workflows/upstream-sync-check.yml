@@ -1,6 +1,6 @@
 name: Upstream sync check
 
-# Weekly routine: has the upstream of this fork moved on, and does that call
+# Weekly routine (Wednesdays): has the upstream of this fork moved on, and does that call
 # for a merge -- above all for security fixes?
 #
 #   1. check   deterministic: divergence, merge conflicts, security-relevant
@@ -18,7 +18,8 @@ name: Upstream sync check
 
 on:
   schedule:
-    - cron: "17 5 * * 1" # Mondays 05:17 UTC
+    # GitHub cron is UTC: 04:17 UTC = Wednesday 05:17 CET (06:17 CEST in summer).
+    - cron: "17 4 * * 3"
   workflow_dispatch:
     inputs:
       force:
