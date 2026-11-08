@@ -189,9 +189,10 @@ You're connected directly to the tablet via SSH. This enables:
 
 Write operations are enabled. These tools modify your tablet's filesystem:
 
-- `remarkable_upload(file_path, parent_folder, document_name, defer_restart)` - Upload a PDF/EPUB
-- `remarkable_markdown_to_pdf(markdown, document_name, parent_folder, defer_restart)` -
-  Render Markdown as a PDF and upload it
+- `remarkable_upload(file_path, parent_folder, document_name, tags, defer_restart)` -
+  Upload a PDF/EPUB
+- `remarkable_markdown_to_pdf(markdown, document_name, parent_folder, tags, defer_restart)` -
+  Render Markdown as a PDF and upload it (optionally tagged)
 - `remarkable_mkdir(folder_name, parent, defer_restart)` - Create a folder
 - `remarkable_move(document, dest_folder, defer_restart)` - Move a document/folder
 - `remarkable_rename(document, new_name, defer_restart)` - Rename a document/folder
@@ -217,7 +218,7 @@ Upload is available via the USB web interface:
 
 - `remarkable_upload(file_path)` - Upload a PDF/EPUB file
 - `remarkable_markdown_to_pdf(markdown, document_name)` - Render Markdown as a
-  named PDF and upload it to the root folder
+  named PDF and upload it to the root folder (tags are ignored over USB web)
 
 Note: mkdir, move, rename, and delete require SSH mode.
 """
@@ -246,8 +247,8 @@ and sync to all your devices:
 - `remarkable_upload_base64(content_base64, document_name, parent_folder, tags, replace)` -
   Upload a small PDF/EPUB sent inline as base64
 - `remarkable_tag(document, add, remove)` - Add or remove document tags
-- `remarkable_markdown_to_pdf(markdown, document_name, parent_folder)` - Render
-  Markdown as a PDF and upload it
+- `remarkable_markdown_to_pdf(markdown, document_name, parent_folder, tags)` - Render
+  Markdown as a PDF and upload it (optionally tagged)
 - `remarkable_mkdir(folder_name, parent)` - Create a folder
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder

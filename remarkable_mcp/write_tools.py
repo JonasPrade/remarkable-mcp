@@ -51,7 +51,7 @@ from remarkable_mcp.ssh_reliability import (
     SSHPreExecutionError,
     SSHReliabilityError,
 )
-from remarkable_mcp.tags import tag_entries
+from remarkable_mcp.tags import clean_tag_list, tag_entries
 
 logger = logging.getLogger(__name__)
 _write_context = threading.local()
@@ -1952,12 +1952,20 @@ def register_write_tools():
                         "format": ext,
                         "transport": "usb-web",
                     }
+                    notes = []
                     if parent_folder != "/":
-                        result["note"] = (
+                        notes.append(
                             "USB web ignores parent_folder. The tablet web "
                             "service chooses the destination folder. Use SSH or "
                             "cloud mode for explicit folder placement."
                         )
+                    if tags:
+                        notes.append(
+                            "USB web ignores tags. Use SSH or cloud mode to tag "
+                            "documents on upload."
+                        )
+                    if notes:
+                        result["note"] = " ".join(notes)
                     return make_response(
                         result,
                         "Document uploaded via USB web interface. "
@@ -2008,8 +2016,9 @@ def register_write_tools():
                 content_data = {
                     "fileType": ext,
                 }
-                if tags:
-                    content_data["tags"] = tag_entries(tags)
+                clean_tags = clean_tag_list(tags)
+                if clean_tags:
+                    content_data["tags"] = tag_entries(clean_tags)
                 _write_content_file(ssh_client, doc_uuid, content_data)
 
                 # Create the document directory (required by xochitl)
@@ -2040,9 +2049,11 @@ def register_write_tools():
                         "uuid": doc_uuid,
                         "format": ext,
                         "parent_folder": parent_folder,
+                        "path": f"{parent_folder.rstrip('/')}/{name}",
                         "remote_path": remote_file,
                         "transport": "ssh",
                         "refresh_pending": not restarted,
+                        **({"tags": clean_tags} if clean_tags else {}),
                     },
                     _write_result_message(
                         restarted,
@@ -2215,6 +2226,7 @@ def register_write_tools():
         document_name: str = "Markdown",
         parent_folder: str = "/",
         defer_restart: bool = False,
+        tags: Optional[List[str]] = None,
     ) -> str:
         """
         <usecase>Render Markdown text as a PDF and upload it to the reMarkable tablet.</usecase>
@@ -2229,7 +2241,10 @@ def register_write_tools():
         - Cloud: sync upload with parent_folder and document_name
         - SSH: filesystem upload with parent_folder and document_name
         - USB web: upload whose multipart filename is document_name + ".pdf";
-          parent_folder is ignored and the tablet web service chooses the folder.
+          parent_folder and tags are ignored and the tablet web service chooses
+          the folder.
+
+        Returns the new document's uuid and path like the other upload tools.
 
         Requires write mode (the default; disabled with --read-only).
         </instructions>
@@ -2241,6 +2256,8 @@ def register_write_tools():
         - defer_restart: SSH only. When True, skip the xochitl restart and call
           remarkable_refresh() once after the batch. Forwarded exactly like
           remarkable_upload; ignored in cloud and USB web modes.
+        - tags: Document tags to set on upload, e.g. ["protokoll"]. Cloud and
+          SSH; ignored by the USB web interface.
         </parameters>
         <examples>
         - remarkable_markdown_to_pdf("# Meeting Notes\\n\\n- Follow up with Sam")
@@ -2248,6 +2265,12 @@ def register_write_tools():
             "# Q4 Report\\n\\nRevenue increased **20%**.",
             document_name="Q4 Report",
             parent_folder="/Reports",
+          )
+        - remarkable_markdown_to_pdf(
+            "# Protokoll\\n\\n- Beschluss A",
+            document_name="Protokoll 2026-11-08",
+            parent_folder="/Protokolle",
+            tags=["protokoll", "vorstand"],
           )
         - remarkable_markdown_to_pdf(
             "# Batch item", document_name="Item 1", defer_restart=True
@@ -2277,6 +2300,7 @@ def register_write_tools():
                 parent_folder=parent_folder,
                 document_name=document_name,
                 defer_restart=defer_restart,
+                tags=tags,
             )
 
     if _is_ssh_mode() or _is_cloud_mode():
