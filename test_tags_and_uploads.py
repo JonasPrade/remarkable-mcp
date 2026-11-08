@@ -301,6 +301,110 @@ class TestReplace:
         assert cloud.get_doc(other).parent == folder
 
 
+class TestMarkdownToPdfTags:
+    """remarkable_markdown_to_pdf sets tags exactly like the other upload tools."""
+
+    @pytest.mark.asyncio
+    async def test_cloud_upload_sets_tags_and_returns_uuid_and_path(self, cloud):
+        folder = cloud.add_document("Protokolle", folder=True)
+        data = await _call_tool(
+            "remarkable_markdown_to_pdf",
+            {
+                "markdown": "# Protokoll\n\n- Beschluss A",
+                "document_name": "Protokoll 2026-11-08",
+                "parent_folder": "/Protokolle",
+                "tags": ["protokoll", " Vorstand ", "PROTOKOLL", ""],
+            },
+        )
+        assert data["uploaded"] is True, data
+        assert data["transport"] == "cloud"
+        assert data["path"] == "/Protokolle/Protokoll 2026-11-08"
+        assert data["tags"] == ["protokoll", "Vorstand"]
+        doc = cloud.get_doc(data["uuid"])
+        assert doc.name == "Protokoll 2026-11-08"
+        assert doc.parent == folder
+        assert doc.tags == ["protokoll", "Vorstand"]
+        assert [t["name"] for t in cloud.content_of(data["uuid"])["tags"]] == [
+            "protokoll",
+            "Vorstand",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_cloud_upload_without_tags_has_no_tags(self, cloud):
+        data = await _call_tool(
+            "remarkable_markdown_to_pdf", {"markdown": "# Notiz", "document_name": "Notiz"}
+        )
+        assert data["uploaded"] is True, data
+        assert data["path"] == "/Notiz"
+        assert "tags" not in data
+        assert cloud.get_doc(data["uuid"]).tags == []
+
+    @pytest.mark.asyncio
+    async def test_ssh_upload_writes_tags_to_content_file(self):
+        client = Mock(
+            spec=[
+                "get_meta_items",
+                "_ssh_command",
+                "mark_operation_dirty",
+                "_documents",
+                "_documents_by_id",
+            ]
+        )
+        client.get_meta_items.return_value = []
+        client._documents = []
+        client._documents_by_id = {}
+
+        with (
+            patch.dict(os.environ, {"REMARKABLE_USE_SSH": "1"}, clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+            patch("remarkable_mcp.write_tools._upload_file_bytes"),
+            patch("remarkable_mcp.write_tools._write_metadata"),
+            patch("remarkable_mcp.write_tools._write_content_file") as write_content,
+            patch("remarkable_mcp.write_tools._maybe_restart_xochitl", return_value=False),
+        ):
+            data = await _call_tool(
+                "remarkable_markdown_to_pdf",
+                {
+                    "markdown": "# SSH",
+                    "document_name": "SSH Notes",
+                    "tags": ["planung", "Planung", "review"],
+                    "defer_restart": True,
+                },
+            )
+
+        assert data["uploaded"] is True, data
+        assert data["transport"] == "ssh"
+        assert data["uuid"]
+        assert data["path"] == "/SSH Notes"
+        assert data["tags"] == ["planung", "review"]
+        _, doc_uuid, content = write_content.call_args.args
+        assert doc_uuid == data["uuid"]
+        assert content["fileType"] == "pdf"
+        assert [t["name"] for t in content["tags"]] == ["planung", "review"]
+
+    @pytest.mark.asyncio
+    async def test_usb_web_ignores_tags_with_note(self):
+        client = Mock()
+        client._documents = []
+        client._documents_by_id = {}
+        env = {"REMARKABLE_USE_USB_WEB": "1"}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("remarkable_mcp.write_tools.get_rmapi", return_value=client),
+            patch("remarkable_mcp.write_tools._upload_via_usb_web") as usb_upload,
+        ):
+            data = await _call_tool(
+                "remarkable_markdown_to_pdf",
+                {"markdown": "# USB", "document_name": "USB Notes", "tags": ["planung"]},
+            )
+
+        assert data["uploaded"] is True, data
+        assert data["transport"] == "usb-web"
+        assert "tags" not in data
+        assert "ignores tags" in data["note"]
+        assert usb_upload.call_args.args[1] == "USB Notes"
+
+
 # =============================================================================
 # Tag tool and browse filter
 # =============================================================================

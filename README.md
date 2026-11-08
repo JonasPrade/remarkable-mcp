@@ -675,8 +675,8 @@ Or set the environment variable:
 
 | Tool | Description |
 |------|-------------|
-| `remarkable_upload(file_path, parent_folder, document_name, defer_restart)` | Upload a PDF or EPUB file (cloud, SSH, and USB web; USB web preserves the name but ignores `parent_folder`) |
-| `remarkable_markdown_to_pdf(markdown, document_name, parent_folder, defer_restart)` | Render Markdown as a paginated PDF and upload it (cloud, SSH, and USB web) |
+| `remarkable_upload(file_path, parent_folder, document_name, tags, defer_restart)` | Upload a PDF or EPUB file (cloud, SSH, and USB web; USB web preserves the name but ignores `parent_folder` and `tags`) |
+| `remarkable_markdown_to_pdf(markdown, document_name, parent_folder, tags, defer_restart)` | Render Markdown as a paginated PDF and upload it, optionally tagged (cloud, SSH, and USB web; USB web ignores `parent_folder` and `tags`) |
 | `remarkable_mkdir(folder_name, parent, defer_restart)` | Create a new folder (cloud and SSH) |
 | `remarkable_move(document, dest_folder, defer_restart)` | Move a document or folder (cloud and SSH) |
 | `remarkable_rename(document, new_name, defer_restart)` | Rename a document or folder (cloud and SSH) |
@@ -708,6 +708,7 @@ remarkable_markdown_to_pdf(
     "# Meeting Notes\n\n- Follow up with Sam",
     document_name="Meeting Notes",
     parent_folder="/Research",
+    tags=["meeting"],
 )
 
 # Create a folder

@@ -91,9 +91,7 @@ def commit_list(base: str, head: str) -> list[dict[str, Any]]:
 def classify(commit: dict[str, Any], sensitive: list[str]) -> list[str]:
     reasons = []
     # Trailers (Co-authored-by, Signed-off-by, ...) are not content.
-    body = "\n".join(
-        line for line in commit["body"].splitlines() if not TRAILER_RE.match(line)
-    )
+    body = "\n".join(line for line in commit["body"].splitlines() if not TRAILER_RE.match(line))
     text = f"{commit['subject']}\n{body}"
     hits = sorted({m.group(0).lower() for m in SECURITY_RE.finditer(text)})
     if hits:
@@ -163,9 +161,7 @@ def audit_lockfile(ref: str) -> set[str] | None:
     """Vulnerability ids (package:id) of the uv.lock at `ref`, via pip-audit."""
     if not shutil.which("uv"):
         return None
-    if subprocess.run(
-        ["git", "cat-file", "-e", f"{ref}:uv.lock"], capture_output=True
-    ).returncode:
+    if subprocess.run(["git", "cat-file", "-e", f"{ref}:uv.lock"], capture_output=True).returncode:
         return None
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -241,9 +237,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     if r["advisories"]:
         lines += ["", "### Veröffentlichte Upstream-Advisories seit der Merge-Basis"]
         for a in r["advisories"]:
-            lines.append(
-                f"- [{a['ghsa_id']}]({a['url']}) {a['severity']}: {a['summary']}"
-            )
+            lines.append(f"- [{a['ghsa_id']}]({a['url']}) {a['severity']}: {a['summary']}")
     if r["vulns_fixed_by_merge"]:
         lines += ["", "### Abhängigkeits-Schwachstellen, die der Merge behebt"]
         lines += [f"- `{v}`" for v in r["vulns_fixed_by_merge"]]
@@ -260,17 +254,11 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(
                 f"- `{c['sha'][:8]}` {c['subject']} — _{'; '.join(c['security_reasons'])}_"
             )
-    dep = [
-        c for c in r["commits"] if c["dependency_change"] and not c["security_reasons"]
-    ]
+    dep = [c for c in r["commits"] if c["dependency_change"] and not c["security_reasons"]]
     if dep:
         lines += ["", "### Abhängigkeits-/Supply-Chain-Updates"]
         lines += [f"- `{c['sha'][:8]}` {c['subject']}" for c in dep]
-    rest = [
-        c
-        for c in r["commits"]
-        if not c["security_reasons"] and not c["dependency_change"]
-    ]
+    rest = [c for c in r["commits"] if not c["security_reasons"] and not c["dependency_change"]]
     if rest:
         lines += ["", "<details><summary>Weitere Upstream-Commits</summary>", ""]
         lines += [f"- `{c['sha'][:8]}` {c['subject']}" for c in rest]
@@ -282,13 +270,9 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--upstream-repo", required=True, help="owner/name of the upstream repo"
-    )
+    parser.add_argument("--upstream-repo", required=True, help="owner/name of the upstream repo")
     parser.add_argument("--upstream-branch", default="main")
-    parser.add_argument(
-        "--fork-ref", default="HEAD", help="fork ref to compare (default HEAD)"
-    )
+    parser.add_argument("--fork-ref", default="HEAD", help="fork ref to compare (default HEAD)")
     parser.add_argument(
         "--sensitive-path",
         action="append",
@@ -329,9 +313,7 @@ def main() -> int:
 
     advisories = upstream_advisories(args.upstream_repo, base_date)
     if advisories is None:
-        notes.append(
-            "Upstream-Advisories nicht abgefragt (`gh` fehlt oder kein Zugriff)."
-        )
+        notes.append("Upstream-Advisories nicht abgefragt (`gh` fehlt oder kein Zugriff).")
         advisories = []
     elif advisories and upstream_ahead:
         priority = bump(priority, "critical")
@@ -342,9 +324,7 @@ def main() -> int:
         fork_vulns = audit_lockfile(fork)
         upstream_vulns = audit_lockfile(upstream)
         if fork_vulns is None or upstream_vulns is None:
-            notes.append(
-                "Lockfile-Audit übersprungen (kein `uv`/`uv.lock` oder pip-audit-Fehler)."
-            )
+            notes.append("Lockfile-Audit übersprungen (kein `uv`/`uv.lock` oder pip-audit-Fehler).")
         else:
             fixed = sorted(fork_vulns - upstream_vulns)
             introduced = sorted(upstream_vulns - fork_vulns)
@@ -386,12 +366,8 @@ def main() -> int:
             fh.write(f"priority={priority}\n")
             fh.write(f"upstream_ahead={upstream_ahead}\n")
             fh.write(f"upstream_head={upstream_head}\n")
-            fh.write(
-                f"conflicts={'unknown' if conflicts is None else len(conflicts)}\n"
-            )
-    print(
-        f"priority={priority} upstream_ahead={upstream_ahead} fork_ahead={fork_ahead}"
-    )
+            fh.write(f"conflicts={'unknown' if conflicts is None else len(conflicts)}\n")
+    print(f"priority={priority} upstream_ahead={upstream_ahead} fork_ahead={fork_ahead}")
     return 0
 
 
